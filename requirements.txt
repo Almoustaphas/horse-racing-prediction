@@ -1,0 +1,7 @@
+requests
+pandas
+numpy
+scikit-learn
+joblib
+beautifulsoup4
+lxml
