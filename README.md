@@ -28,9 +28,19 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m prediction.train --target place  # placé
 .venv/bin/python -m prediction.train --no-market     # sans les cotes
 
+# Comparer des jeux de variables sur 3 périodes de test successives de 4 mois
+.venv/bin/python -m prediction.experiment
+
 # 3. Pronostics du jour
 .venv/bin/python -m prediction.predict
 ```
+
+Si les cotes de référence d'une course ne sont pas encore publiées (souvent le matin),
+`predict` bascule automatiquement sur `models/model_win_nomarket.joblib` pour cette course.
+Il faut donc avoir lancé les deux entraînements (`train` et `train --no-market`).
+
+Ne lancez pas `train` pendant une collecte : la lecture peut verrouiller la base SQLite
+et faire échouer l'écriture d'un jour (il sera repris au lancement suivant de `collect`).
 
 Relancer `scraper.collect` sans `--end` complète la base jusqu'à hier.
 

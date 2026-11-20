@@ -60,10 +60,22 @@ def main():
     today["ordre_arrivee"] = None
     today["incident"] = None
     today["reduction_km"] = None
+    # Aligner les types sur l'historique (les None rendent les colonnes « object »)
+    for col in hist.select_dtypes("number").columns:
+        if col in today:
+            today[col] = pd.to_numeric(today[col], errors="coerce")
     df = build_features(pd.concat([hist, today], ignore_index=True))
     day_df = df[df["jour"] == pd.Timestamp(args.date)].copy()
 
     day_df["proba"] = bundle["model"].predict_proba(day_df[bundle["features"]])[:, 1]
+    # Courses sans cotes de référence (pas encore publiées) -> modèle sans marché
+    no_ref = day_df.groupby("course_id")["p_ref"].transform(lambda s: s.isna().any())
+    nomarket_path = args.model.with_name(args.model.stem + "_nomarket.joblib")
+    day_df["modele"] = "avec cotes"
+    if no_ref.any() and nomarket_path.exists():
+        nm = joblib.load(nomarket_path)
+        day_df.loc[no_ref, "proba"] = nm["model"].predict_proba(day_df.loc[no_ref, nm["features"]])[:, 1]
+        day_df.loc[no_ref, "modele"] = "sans cotes"
     day_df["proba"] = day_df["proba"] / day_df.groupby("course_id")["proba"].transform("sum")
     day_df["cote_juste"] = 1 / day_df["proba"]
 
@@ -71,7 +83,7 @@ def main():
     for cid, race in day_df.sort_values("heure_depart").groupby("course_id", sort=False):
         heure = pd.to_datetime(race["heure_depart"].iloc[0], unit="ms", utc=True).tz_convert("Europe/Paris")
         print(f"\n{cid}  {heure:%H:%M}  {race['hippodrome'].iloc[0]}  {libelles.get(cid, '')}"
-              f"  ({race['specialite'].iloc[0]}, {race['distance'].iloc[0]} m)")
+              f"  ({race['specialite'].iloc[0]}, {race['distance'].iloc[0]} m) [modèle {race['modele'].iloc[0]}]")
         top = race.sort_values("proba", ascending=False).head(5)
         for _, r in top.iterrows():
             cote = f"{r['cote_reference']:.1f}" if pd.notna(r["cote_reference"]) else "  -"

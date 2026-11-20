@@ -62,7 +62,7 @@ def main():
     print("Chargement et calcul des variables…")
     df = build_features(load_raw(args.db))
     df = df[df["ordre_arrivee"].notna() | df["incident"].notna()]  # courses avec résultat
-    feats = [f for f in FEATURES if not (args.no_market and f.startswith("p_ref"))]
+    feats = [f for f in FEATURES if not (args.no_market and (f.startswith("p_ref") or f.startswith("prev_p_ref")))]
 
     test_start = pd.Timestamp(args.test_start) if args.test_start else df["jour"].max() - pd.DateOffset(months=6)
     # On écarte les 3 premiers mois : historique cheval/driver encore vide
@@ -83,9 +83,12 @@ def main():
 
     test["p_model"] = model.predict_proba(test[feats])[:, 1]
     test["p_uniforme"] = 1.0
+    # Comparaison à armes égales : courses où tous les partants ont une cote
+    full_ref = test.groupby("course_id")["p_ref"].transform(lambda s: s.notna().all())
+    test = test[full_ref].copy()
+    print(f"Courses évaluées (toutes cotes connues) : {test['course_id'].nunique()}")
     rows = {"Modèle": evaluate(test, "p_model", target)}
-    has_ref = test["p_ref"].notna()
-    rows["Marché (cote réf.)"] = evaluate(test[has_ref], "p_ref", target)
+    rows["Marché (cote réf.)"] = evaluate(test, "p_ref", target)
     rows["Hasard"] = evaluate(test, "p_uniforme", target)
     print("\n=== Résultats sur le jeu de test ===")
     print(pd.DataFrame(rows).T.round(4).to_string())

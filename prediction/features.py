@@ -75,6 +75,24 @@ def add_prior_stats(df, key, prefix, k=10):
     df[f"{prefix}_place_rate"] = (places + k * p_place) / (runs + k)
 
 
+def add_window_stats(df, key, prefix, days=90, k=20):
+    """Forme récente : taux de victoire / podium sur les `days` jours précédant le
+    jour de la course (le jour même est exclu)."""
+    # Une ligne par (entité, jour), triée par entité puis par jour
+    daily = (df.groupby([key, "jour"])
+               .agg(w=("is_win", "sum"), p=("is_place", "sum"), n=("is_win", "size"))
+               .reset_index().set_index("jour"))
+    # Somme glissante sur [jour - days, jour[ ; résultat indexé (entité, jour), unique
+    daily = (daily.groupby(key)[["w", "p", "n"]]
+                  .rolling(f"{days}D", closed="left").sum().fillna(0).reset_index())
+    daily[f"{prefix}_runs_{days}j"] = daily["n"]
+    daily[f"{prefix}_win_{days}j"] = (daily["w"] + k * 0.09) / (daily["n"] + k)
+    daily[f"{prefix}_place_{days}j"] = (daily["p"] + k * 0.27) / (daily["n"] + k)
+    cols = [f"{prefix}_runs_{days}j", f"{prefix}_win_{days}j", f"{prefix}_place_{days}j"]
+    merged = df[[key, "jour"]].merge(daily[[key, "jour"] + cols], on=[key, "jour"], how="left")
+    df[cols] = merged[cols].to_numpy()
+
+
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["jour"] = pd.to_datetime(df["jour"])
@@ -107,7 +125,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     # --- Marché : cote de référence (disponible avant la course)
-    df["p_ref"] = 1 / df["cote_reference"]
+    df["p_ref"] = 1 / df["cote_reference"].where(df["cote_reference"] > 1)  # cote 0 = absente
     df["p_ref"] = df["p_ref"] / df.groupby("course_id")["p_ref"].transform("sum")
 
     # --- Historique calculé à partir de notre base
@@ -123,9 +141,31 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     rk_cnt = rk_grp["n"].cumsum() - rk.notna().astype(int)
     df["rk_moy_passee"] = (rk_sum / rk_cnt.replace(0, np.nan))
 
+    # --- Forme récente (fenêtre glissante de 90 jours)
+    add_window_stats(df, "driver", "driver")
+    add_window_stats(df, "entraineur", "trainer")
+
+    # --- Aptitudes du cheval et associations (historique de la base)
+    df["dist_band"] = df["specialite"].astype(str) + "_" + (df["distance"] // 400).astype(str)
+    add_prior_stats(df, ["horse_key", "dist_band"], "horse_dist", k=5)
+    add_prior_stats(df, ["horse_key", "hippodrome"], "horse_hippo", k=5)
+    add_prior_stats(df, ["horse_key", "driver"], "duo", k=5)
+    add_prior_stats(df, ["driver", "hippodrome"], "driver_hippo", k=20)
+
+    # --- Dernière course du cheval dans la base
+    hg = df.groupby("horse_key")
+    df["prev_driver_diff"] = (hg["driver"].shift(1) != df["driver"]).astype(float).where(
+        hg["driver"].shift(1).notna())
+    df["prev_pos"] = hg["ordre_arrivee"].shift(1).fillna(12).where(hg.cumcount() > 0)
+    df["prev_p_ref"] = hg["p_ref"].shift(1)
+    df["prev_nb_partants"] = hg["nb_partants"].shift(1)
+    df["delta_prix"] = df["log_prix"] - hg["log_prix"].shift(1)       # monte / descend de catégorie
+    df["delta_distance"] = df["distance"] - hg["distance"].shift(1)
+
     # --- Variables relatives à la course (comparaison aux adversaires)
     for col in ["p_ref", "career_win_rate", "log_gains_annee", "driver_win_rate",
-                "horse_win_rate", "mus_pos_moy", "rk_moy_passee", "handicap_valeur"]:
+                "horse_win_rate", "mus_pos_moy", "rk_moy_passee", "handicap_valeur",
+                "driver_win_90j", "trainer_win_90j", "horse_dist_win_rate", "prev_p_ref"]:
         grp = df.groupby("course_id")[col]
         df[f"{col}_rang"] = grp.rank(pct=True)
         df[f"{col}_ecart"] = df[col] - grp.transform("mean")
@@ -154,3 +194,19 @@ FEATURES = [
 ] + [f"{c}_{s}" for c in ["p_ref", "career_win_rate", "log_gains_annee", "driver_win_rate",
                           "horse_win_rate", "mus_pos_moy", "rk_moy_passee", "handicap_valeur"]
      for s in ("rang", "ecart")]
+
+# Variables ajoutées dans la v2 (forme récente, aptitudes, dernière course)
+NEW_FEATURES = [
+    "driver_runs_90j", "driver_win_90j", "driver_place_90j",
+    "trainer_runs_90j", "trainer_win_90j", "trainer_place_90j",
+    "horse_dist_runs", "horse_dist_win_rate", "horse_dist_place_rate",
+    "horse_hippo_runs", "horse_hippo_win_rate", "horse_hippo_place_rate",
+    "duo_runs", "duo_win_rate", "duo_place_rate",
+    "driver_hippo_win_rate", "driver_hippo_place_rate",
+    "prev_driver_diff", "prev_pos", "prev_p_ref", "prev_nb_partants",
+    "delta_prix", "delta_distance",
+] + [f"{c}_{s}" for c in ["driver_win_90j", "trainer_win_90j", "horse_dist_win_rate", "prev_p_ref"]
+     for s in ("rang", "ecart")]
+
+FEATURES_V1 = list(FEATURES)
+FEATURES = FEATURES_V1 + NEW_FEATURES
