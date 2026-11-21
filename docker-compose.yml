@@ -1,0 +1,23 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      RATE_LIMIT_PER_MIN: "60"
+    volumes:
+      - ./database:/app/database
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/sante')"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+
+  scheduler:
+    build: .
+    command: ["python", "-m", "api.jobs", "scheduler"]
+    volumes:
+      - ./database:/app/database
+      - ./models:/app/models:ro
+    restart: unless-stopped
