@@ -3,6 +3,7 @@
 Usage :
     python -m scraper.collect --start 2023-01-01 --end 2026-11-18
     python -m scraper.collect --start 2026-11-15 --end 2026-11-15 --all-countries
+    python -m scraper.collect --backfill-quinte   # Quinté+ des jours déjà collectés
 
 La collecte est reprenable : un jour déjà présent dans `collected_days`
 est ignoré (sauf --force).
@@ -36,7 +37,8 @@ CREATE TABLE IF NOT EXISTS courses (
     montant_prix INTEGER, nb_declares INTEGER,
     penetrometre REAL, terrain TEXT,
     meteo TEXT, temperature REAL, vent REAL,
-    statut TEXT, duree_course INTEGER, nature_reunion TEXT
+    statut TEXT, duree_course INTEGER, nature_reunion TEXT,
+    quinte INTEGER                       -- 1 si course support du Quinté+
 );
 CREATE TABLE IF NOT EXISTS participants (
     course_id TEXT, num_pmu INTEGER,
@@ -82,6 +84,40 @@ def to_float(v):
         return None
 
 
+def is_quinte(c) -> int:
+    """1 si la course est support du Quinté+ (pari QUINTE_PLUS proposé)."""
+    return int(any("QUINTE" in (p.get("typePari") or "") for p in c.get("paris") or []))
+
+
+def init_db(conn):
+    """Crée les tables et ajoute les colonnes apparues depuis (bases existantes)."""
+    conn.executescript(SCHEMA)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(courses)")}
+    if "quinte" not in cols:
+        conn.execute("ALTER TABLE courses ADD COLUMN quinte INTEGER")
+        conn.commit()
+
+
+def backfill_quinte(client, conn, workers=4):
+    """Renseigne la colonne quinte des jours collectés avant son ajout (1 requête par jour)."""
+    days = [r[0] for r in conn.execute(
+        "SELECT DISTINCT jour FROM courses WHERE quinte IS NULL ORDER BY jour")]
+    print(f"{len(days)} jours à compléter", flush=True)
+
+    def fetch(day):
+        return day, client.programme(date.fromisoformat(day))
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for i, (day, prog) in enumerate(pool.map(fetch, days), 1):
+            rows = [(is_quinte(c), f"{day}_R{r['numOfficiel']}_C{c['numOrdre']}")
+                    for r in (prog or {}).get("reunions", []) for c in r.get("courses", [])]
+            conn.executemany("UPDATE courses SET quinte = ? WHERE course_id = ?", rows)
+            conn.execute("UPDATE courses SET quinte = 0 WHERE jour = ? AND quinte IS NULL", (day,))
+            conn.commit()
+            if i % 100 == 0:
+                print(f"  {i}/{len(days)} ({day})", flush=True)
+
+
 def course_row(day, reunion, c):
     return {
         "course_id": f"{day.isoformat()}_R{reunion['numOfficiel']}_C{c['numOrdre']}",
@@ -111,6 +147,7 @@ def course_row(day, reunion, c):
         "statut": c.get("statut"),
         "duree_course": c.get("dureeCourse"),
         "nature_reunion": reunion.get("nature"),
+        "quinte": is_quinte(c),
     }
 
 
@@ -210,17 +247,25 @@ def collect_day(client, conn, day, all_countries=False, workers=4):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--start", required=True, type=date.fromisoformat)
+    ap.add_argument("--start", type=date.fromisoformat)
     ap.add_argument("--end", type=date.fromisoformat, default=date.today() - timedelta(days=1))
     ap.add_argument("--db", type=Path, default=DB_PATH)
     ap.add_argument("--all-countries", action="store_true", help="inclure les courses étrangères")
     ap.add_argument("--force", action="store_true", help="recollecter les jours déjà présents")
     ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--backfill-quinte", action="store_true",
+                    help="renseigner le Quinté+ des jours déjà collectés, puis quitter")
     args = ap.parse_args()
+    if not args.start and not args.backfill_quinte:
+        ap.error("--start est obligatoire")
 
     args.db.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(args.db, check_same_thread=False)
-    conn.executescript(SCHEMA)
+    conn = sqlite3.connect(args.db, check_same_thread=False, timeout=120)
+    init_db(conn)
+    if args.backfill_quinte:
+        backfill_quinte(PMUClient(), conn, args.workers)
+        conn.close()
+        return
     done = {r[0] for r in conn.execute("SELECT jour FROM collected_days")}
 
     client = PMUClient()

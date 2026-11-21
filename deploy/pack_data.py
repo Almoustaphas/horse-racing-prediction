@@ -18,6 +18,8 @@ from prediction.predict import MODELS_DIR
 
 ROOT = Path(__file__).resolve().parent.parent
 MODELS = ["model_win.joblib", "model_win_nomarket.joblib", "model_place.joblib"]
+# Facultatifs : ajoutés s'ils existent (probabilités top 3 / top 5 sans cotes, top 5)
+OPTIONAL = ["model_place_nomarket.joblib", "model_top5.joblib", "model_top5_nomarket.joblib"]
 
 
 def main():
@@ -34,7 +36,7 @@ def main():
         src.close(), dst.close()
         with tarfile.open(out, "w:gz") as tar:
             tar.add(copy, arcname="pmu.sqlite")
-            for m in MODELS:
+            for m in MODELS + [o for o in OPTIONAL if (MODELS_DIR / o).exists()]:
                 tar.add(MODELS_DIR / m, arcname=f"models/{m}")
     print(f"{out} ({out.stat().st_size / 1e6:.0f} Mo)")
 

@@ -35,12 +35,13 @@ def load_raw(db_path=DB_PATH, chunksize=50_000) -> pd.DataFrame:
     de mémoire (≈ 2 Go en une fois, la machine de production n'en a pas autant)."""
     conn = sqlite3.connect(db_path)
     cols = [r[1] for r in conn.execute("PRAGMA table_info(participants)") if r[1] not in UNUSED_COLUMNS]
+    has_quinte = "quinte" in {r[1] for r in conn.execute("PRAGMA table_info(courses)")}
     chunks = pd.read_sql_query(
         f"""
         SELECT {", ".join("p." + c for c in cols)},
                c.jour, c.heure_depart, c.hippodrome, c.discipline, c.specialite,
                c.distance, c.corde, c.type_piste, c.categorie, c.montant_prix,
-               c.penetrometre, c.temperature
+               c.penetrometre, c.temperature{", c.quinte" if has_quinte else ""}
         FROM participants p JOIN courses c USING (course_id)
         WHERE p.statut = 'PARTANT'
         """,
@@ -119,6 +120,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     # Cibles (lignes futures sans résultat -> 0, elles n'influencent rien après elles)
     df["is_win"] = (df["ordre_arrivee"] == 1).astype(int)
     df["is_place"] = (df["ordre_arrivee"].between(1, 3)).astype(int)
+    df["is_top5"] = (df["ordre_arrivee"].between(1, 5)).astype(int)
 
     # --- Contexte de la course
     df["nb_partants"] = df.groupby("course_id")["num_pmu"].transform("size")

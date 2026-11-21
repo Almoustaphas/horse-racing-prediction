@@ -34,6 +34,10 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m prediction.train                 # gagnant
 .venv/bin/python -m prediction.train --target place  # placé
 .venv/bin/python -m prediction.train --no-market     # sans les cotes
+.venv/bin/python -m prediction.train --target top5   # dans les 5 premiers
+# Versions sans cotes des modèles placé et top 5 (repli le matin, voir plus bas)
+.venv/bin/python -m prediction.train --target place --no-market
+.venv/bin/python -m prediction.train --target top5 --no-market
 
 # Comparer des jeux de variables sur 3 périodes de test successives de 4 mois
 .venv/bin/python -m prediction.experiment
@@ -44,12 +48,15 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 Si les cotes de référence d'une course ne sont pas encore publiées (souvent le matin),
 `predict` bascule automatiquement sur `models/model_win_nomarket.joblib` pour cette course.
-Il faut donc avoir lancé les deux entraînements (`train` et `train --no-market`).
+Il faut donc avoir lancé au moins `train`, `train --no-market` et `train --target place` ;
+les modèles top 5 et les versions sans cotes du placé et du top 5 sont utilisés s'ils existent.
 
 Ne lancez pas `train` pendant une collecte : la lecture peut verrouiller la base SQLite
 et faire échouer l'écriture d'un jour (il sera repris au lancement suivant de `collect`).
 
 Relancer `scraper.collect` sans `--end` complète la base jusqu'à hier.
+La colonne `courses.quinte` repère la course support du Quinté+ (une par jour) ;
+`scraper.collect --backfill-quinte` la renseigne pour une base collectée avant son ajout.
 
 ## API
 
@@ -74,13 +81,14 @@ curl -H "X-API-Key: <clé>" "http://127.0.0.1:8000/v1/pronostics?top=3"
 |---|---|
 | `GET /sante` | état du service et dernière publication (sans clé) |
 | `GET /v1/courses?date=AAAA-MM-JJ` | courses du jour ayant des pronostics |
-| `GET /v1/pronostics?date=…&top=N` | pronostics de toutes les courses, partants classés |
+| `GET /v1/pronostics?date=…&top=N&quinte=true` | pronostics de toutes les courses (ou du seul Quinté+), partants classés |
 | `GET /v1/courses/{course_id}/pronostics` | pronostics d'une course (`2026-11-20_R1_C1`) |
-| `GET /v1/bilan?debut=…&fin=…` | performance réelle des pronostics archivés (défaut : 30 derniers jours) |
+| `GET /v1/bilan?debut=…&fin=…&quinte=true` | performance réelle des pronostics archivés (défaut : 30 derniers jours) |
 
-Chaque partant a `proba` (victoire), `proba_place`, `cote_juste` (= 1 / proba),
-`cote_reference` (cote PMU si publiée) et `rang` ; chaque course indique `modele`
-(« avec cotes » ou « sans cotes »). Toutes les réponses portent un avertissement jeu responsable.
+Chaque partant a `proba` (victoire), `proba_place` (dans les 3 premiers), `proba_top5`
+(dans les 5 premiers), `cote_juste` (= 1 / proba), `cote_reference` (cote PMU si publiée) et `rang` ;
+dans une course, ces probabilités somment à 1, 3 et 5. Chaque course indique `modele`
+(« avec cotes » ou « sans cotes ») et `quinte` (support du Quinté+). Toutes les réponses portent un avertissement jeu responsable.
 
 ### Archive et bilan
 
@@ -88,7 +96,8 @@ Chaque partant a `proba` (victoire), `proba_place`, `cote_juste` (= 1 / proba),
 la table `pronostics_archive` ; une fois la course partie, sa version n'est plus modifiée.
 Chaque matin, `daily` copie les arrivées de la veille (table `resultats`) et le bilan compare :
 réussite du premier choix, premier choix dans les 3, réussite du favori du marché,
-et ROI d'une mise de 1 € au simple gagnant sur le premier choix (cote PMU finale).
+ROI d'une mise de 1 € au simple gagnant sur le premier choix (cote PMU finale), et nombre
+de chevaux trouvés parmi les 5 premiers (les 5 jugés les plus probables d'y être).
 Les courses dont le premier choix est non partant sont exclues.
 
 ```bash

@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 from api import store
 from prediction.features import DB_PATH
 from prediction.predict import MODELS_DIR, predict_day
-from scraper.collect import SCHEMA as PMU_SCHEMA, collect_day
+from scraper.collect import collect_day, init_db
 from scraper.pmu_client import PMUClient
 
 PARIS = ZoneInfo("Europe/Paris")
@@ -54,7 +54,7 @@ def refresh(day: date, conn=None, **predict_kwargs) -> int:
 def collect_yesterday():
     day = today_paris() - timedelta(days=1)
     conn = sqlite3.connect(DB_PATH, timeout=60)
-    conn.executescript(PMU_SCHEMA)
+    init_db(conn)
     n = collect_day(PMUClient(), conn, day)
     conn.close()
     print(f"[{datetime.now(PARIS):%H:%M}] collecte {day} : {n} courses", flush=True)
@@ -67,8 +67,11 @@ def import_results(day: date, conn=None, db_path=DB_PATH) -> int:
     pmu = sqlite3.connect(db_path, timeout=60)
     df = pd.read_sql("SELECT course_id, num_pmu, statut, ordre_arrivee, cote_direct FROM participants "
                      "WHERE course_id LIKE ?", pmu, params=(f"{day.isoformat()}_%",))
+    quinte = pmu.execute("SELECT course_id, quinte FROM courses WHERE jour = ? AND quinte IS NOT NULL",
+                         (day.isoformat(),)).fetchall()
     pmu.close()
     store.save_results(conn, day.isoformat(), df)
+    store.set_quinte(conn, quinte)
     resume = store.resume_bilan(store.bilan_courses(conn, day.isoformat(), day.isoformat()))
     print(f"[{datetime.now(PARIS):%H:%M}] bilan {day} : {resume}", flush=True)
     return df["course_id"].nunique()

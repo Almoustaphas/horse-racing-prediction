@@ -33,3 +33,19 @@ def test_parse_musique():
     pos_moy, last, wins, podiums, fautes = parse_musique("1a3aDa0a(25)2a")
     assert last == 1 and wins == 1 and podiums == 3 and fautes == 1
     assert pos_moy == pytest.approx((1 + 3 + 12 + 10 + 2) / 5)
+
+
+def test_is_quinte():
+    from scraper.collect import is_quinte
+    assert is_quinte({"paris": [{"typePari": "TIERCE"}, {"typePari": "QUINTE_PLUS"}]}) == 1
+    assert is_quinte({"paris": [{"typePari": "SUPER_PICK5"}]}) == 0
+    assert is_quinte({}) == 0
+
+
+def test_evaluate_top5():
+    from prediction.train import evaluate
+    # 6 partants ; le modèle préfère 1 à 6 ; les 5 premiers réels sont 1, 2, 3, 4, 6
+    d = pd.DataFrame({"course_id": ["c"] * 6, "p": [6, 5, 4, 3, 2, 1],
+                      "is_top5": [1, 1, 1, 1, 0, 1], "cote_direct": [None] * 6})
+    out = evaluate(d, "p", "is_top5")
+    assert out["top5_trouves"] == 4 and out["top5_complet"] == 0

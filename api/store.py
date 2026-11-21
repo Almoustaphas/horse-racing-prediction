@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS pronostics (
     hippodrome TEXT, libelle_course TEXT, specialite TEXT, distance INTEGER,
     nb_partants INTEGER, nom TEXT, driver TEXT, entraineur TEXT,
     proba REAL, proba_place REAL, cote_juste REAL, cote_reference REAL,
-    rang INTEGER, modele TEXT, updated_at TEXT,
+    rang INTEGER, modele TEXT, updated_at TEXT, proba_top5 REAL, quinte INTEGER,
     PRIMARY KEY (course_id, num_pmu)
 );
 CREATE INDEX IF NOT EXISTS idx_prono_jour ON pronostics(jour);
@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS pronostics_archive (
     hippodrome TEXT, libelle_course TEXT, specialite TEXT, distance INTEGER,
     nb_partants INTEGER, nom TEXT, driver TEXT, entraineur TEXT,
     proba REAL, proba_place REAL, cote_juste REAL, cote_reference REAL,
-    rang INTEGER, modele TEXT, updated_at TEXT,
+    rang INTEGER, modele TEXT, updated_at TEXT, proba_top5 REAL, quinte INTEGER,
     PRIMARY KEY (course_id, num_pmu)
 );
 CREATE INDEX IF NOT EXISTS idx_archive_jour ON pronostics_archive(jour);
@@ -56,7 +56,9 @@ CREATE TABLE IF NOT EXISTS refresh_log (
 
 ARCHIVE_COLS = ("course_id, num_pmu, jour, heure_depart, hippodrome, libelle_course, specialite, "
                 "distance, nb_partants, nom, driver, entraineur, proba, proba_place, cote_juste, "
-                "cote_reference, rang, modele, updated_at")
+                "cote_reference, rang, modele, updated_at, proba_top5, quinte")
+# Colonnes ajoutées après la première version (bases existantes)
+ADDED_COLUMNS = {"proba_top5": "REAL", "quinte": "INTEGER"}
 
 
 def now_iso():
@@ -70,6 +72,12 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")  # lectures possibles pendant une écriture
     conn.executescript(SCHEMA)
+    for table in ("pronostics", "pronostics_archive"):
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for col, typ in ADDED_COLUMNS.items():
+            if col not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+    conn.commit()
     with conn:  # reprise des pronostics publiés avant l'existence de l'archive
         conn.execute(f"""
             INSERT OR IGNORE INTO pronostics_archive ({ARCHIVE_COLS})
@@ -136,18 +144,26 @@ def save_results(conn, day: str, df: pd.DataFrame):
                          _rows(df, cols))
 
 
+def set_quinte(conn, rows):
+    """Complète le repère Quinté+ des pronostics archivés avant son ajout ((course_id, quinte), …)."""
+    with conn:
+        conn.executemany("UPDATE pronostics_archive SET quinte = ? WHERE course_id = ? AND quinte IS NULL",
+                         [(q, cid) for cid, q in rows])
+
+
 def bilan_courses(conn, debut: str, fin: str) -> pd.DataFrame:
     """Une ligne par course archivée et arrivée : premier choix du modèle et favori du marché.
 
     Une course est écartée si elle n'a pas de gagnant connu ou si le premier choix
     du modèle n'a pas pris le départ (mise remboursée).
     """
-    a = pd.read_sql("SELECT course_id, jour, num_pmu, rang, proba, cote_reference, modele "
+    a = pd.read_sql("SELECT course_id, jour, num_pmu, rang, proba, proba_top5, cote_reference, modele, "
+                    "COALESCE(quinte, 0) AS quinte "
                     "FROM pronostics_archive WHERE jour BETWEEN ? AND ?", conn, params=(debut, fin))
     r = pd.read_sql("SELECT course_id, num_pmu, statut, ordre_arrivee, cote_direct "
                     "FROM resultats WHERE jour BETWEEN ? AND ?", conn, params=(debut, fin))
-    cols = ["course_id", "jour", "modele", "top1_num", "top1_gagne", "top1_place", "top1_cote",
-            "top1_gain", "favori_gagne"]
+    cols = ["course_id", "jour", "modele", "quinte", "top1_num", "top1_gagne", "top1_place", "top1_cote",
+            "top1_gain", "favori_gagne", "top5_trouves", "top5_complet"]
     if a.empty or r.empty:
         return pd.DataFrame(columns=cols)
     m = a.merge(r, on=["course_id", "num_pmu"], how="left")
@@ -162,13 +178,20 @@ def bilan_courses(conn, debut: str, fin: str) -> pd.DataFrame:
         cotes = g.loc[g["statut"] == "PARTANT", ["cote_reference", "ordre_arrivee"]].dropna(subset=["cote_reference"])
         cotes = cotes[cotes["cote_reference"] > 1]
         gagne = top["ordre_arrivee"] == 1
+        # 5 chevaux les plus probables d'être dans les 5 premiers (à défaut : de gagner)
+        score = g["proba_top5"] if g["proba_top5"].notna().all() else g["proba"]
+        cinq = g.loc[score.nlargest(5).index, "ordre_arrivee"]
+        trouves = int(cinq.between(1, 5).sum())
         cote = top["cote_direct"] if pd.notna(top["cote_direct"]) and top["cote_direct"] > 1 else None
         out.append({
-            "course_id": cid, "jour": top["jour"], "modele": top["modele"], "top1_num": int(top["num_pmu"]),
+            "course_id": cid, "jour": top["jour"], "modele": top["modele"], "quinte": bool(top["quinte"]),
+            "top1_num": int(top["num_pmu"]),
             "top1_gagne": bool(gagne), "top1_place": bool(1 <= (top["ordre_arrivee"] or 0) <= 3),
             "top1_cote": cote, "top1_gain": (cote if gagne else 0.0) if cote else None,
             "favori_gagne": (bool(cotes.loc[cotes["cote_reference"].idxmin(), "ordre_arrivee"] == 1)
                              if not cotes.empty else None),
+            "top5_trouves": trouves if len(g) >= 5 else None,
+            "top5_complet": trouves == 5 if len(g) >= 5 else None,
         })
     return pd.DataFrame(out, columns=cols)
 
@@ -177,6 +200,7 @@ def resume_bilan(df: pd.DataFrame) -> dict:
     """Agrège un bilan : réussite du premier choix, ROI au simple gagnant (1 € par course)."""
     paris = df.dropna(subset=["top1_gain"])
     fav = df.dropna(subset=["favori_gagne"])
+    t5 = df.dropna(subset=["top5_trouves"])
     mises = len(paris)
     gains = float(paris["top1_gain"].sum()) if mises else 0.0
     return {
@@ -187,6 +211,8 @@ def resume_bilan(df: pd.DataFrame) -> dict:
         "mises": mises,
         "gains": round(gains, 2),
         "roi": round(gains / mises - 1, 4) if mises else None,
+        "top5_trouves_moyen": float(t5["top5_trouves"].mean()) if len(t5) else None,
+        "top5_complet": float(t5["top5_complet"].astype(bool).mean()) if len(t5) else None,
     }
 
 

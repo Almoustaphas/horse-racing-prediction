@@ -27,7 +27,7 @@ MODELS_DIR = Path(os.environ.get("MODELS_DIR", ROOT / "models"))
 OUTPUT_COLUMNS = [
     "course_id", "jour", "heure_depart", "hippodrome", "libelle_course", "specialite",
     "distance", "nb_partants", "num_pmu", "nom", "driver", "entraineur",
-    "proba", "proba_place", "cote_juste", "cote_reference", "rang", "modele",
+    "proba", "proba_place", "proba_top5", "cote_juste", "cote_reference", "rang", "modele", "quinte",
 ]
 
 
@@ -49,6 +49,7 @@ def fetch_day(day, all_countries=False):
                     "jour", "heure_depart", "hippodrome", "discipline", "specialite", "distance",
                     "corde", "type_piste", "categorie", "montant_prix", "penetrometre", "temperature")})
                 prow["libelle_course"] = crow["libelle"]
+                prow["quinte"] = crow["quinte"]
                 rows.append(prow)
     return pd.DataFrame(rows)
 
@@ -90,19 +91,30 @@ def predict_day(day: date, models_dir: Path = MODELS_DIR, db_path: Path = DB_PAT
     day_df["proba"] = day_df["proba"] / day_df.groupby("course_id")["proba"].transform("sum")
     day_df["cote_juste"] = 1 / day_df["proba"]
 
-    place_path = models_dir / "model_place.joblib"
-    if place_path.exists():
-        pl = _predict(joblib.load(place_path), day_df)
-        # Somme des probas de place = nombre de places payées (3, ou moins si peu de partants)
-        n_places = day_df["nb_partants"].clip(upper=3)
-        pl = pl / day_df.assign(pl=pl).groupby("course_id")["pl"].transform("sum") * n_places
-        day_df["proba_place"] = np.clip(pl, 0, 0.99)
-    else:
-        day_df["proba_place"] = np.nan
+    # Somme des probas d'une course = nombre de chevaux concernés (3 placés, 5 premiers,
+    # ou moins si peu de partants)
+    for col, name, k in (("proba_place", "place", 3), ("proba_top5", "top5", 5)):
+        path = models_dir / f"model_{name}.joblib"
+        if not path.exists():
+            day_df[col] = np.nan
+            continue
+        pr = _predict(joblib.load(path), day_df)
+        nm_path = models_dir / f"model_{name}_nomarket.joblib"
+        if no_ref.any() and nm_path.exists():  # même repli que pour le gagnant
+            pr[no_ref.to_numpy()] = _predict(joblib.load(nm_path), day_df.loc[no_ref])
+        pr = pr / day_df.assign(pr=pr).groupby("course_id")["pr"].transform("sum") * day_df["nb_partants"].clip(upper=k)
+        day_df[col] = np.clip(pr, 0, 0.99)
+    # Cohérence : P(top 5) >= P(top 3) >= P(gagner)
+    day_df["proba_place"] = np.fmax(day_df["proba_place"], day_df["proba"])
+    day_df["proba_top5"] = np.fmax(day_df["proba_top5"], day_df["proba_place"])
 
     day_df["rang"] = day_df.groupby("course_id")["proba"].rank(ascending=False, method="first").astype(int)
     libelles = today.drop_duplicates("course_id").set_index("course_id")["libelle_course"]
     day_df["libelle_course"] = day_df["course_id"].map(libelles)
+    if "quinte" in today:
+        day_df["quinte"] = day_df["course_id"].map(today.drop_duplicates("course_id").set_index("course_id")["quinte"])
+    else:
+        day_df["quinte"] = 0
     day_df["jour"] = day_df["jour"].dt.date.astype(str)
     day_df["specialite"] = day_df["specialite"].astype(str)
     return day_df[OUTPUT_COLUMNS].sort_values(["heure_depart", "course_id", "rang"]).reset_index(drop=True)

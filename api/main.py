@@ -87,6 +87,7 @@ class Partant(BaseModel):
     rang: int
     proba: float
     proba_place: float | None
+    proba_top5: float | None
     cote_juste: float
     cote_reference: float | None
 
@@ -99,6 +100,7 @@ class Course(BaseModel):
     specialite: str | None
     distance: int | None
     nb_partants: int | None
+    quinte: bool
     modele: str
     mis_a_jour: str | None
 
@@ -133,6 +135,8 @@ class Bilan(BaseModel):
     mises: int
     gains: float
     roi: float | None
+    top5_trouves_moyen: float | None
+    top5_complet: float | None
 
 
 class BilanJour(Bilan):
@@ -144,7 +148,9 @@ class ReponseBilan(Reponse):
     fin: str
     methode: str = ("Dernier pronostic publié avant le départ de chaque course ; mise de 1 € "
                     "au simple gagnant sur le premier choix, payée à la cote PMU finale. "
-                    "Courses dont le premier choix est non partant exclues.")
+                    "Courses dont le premier choix est non partant exclues. "
+                    "top5 : parmi les 5 chevaux jugés les plus probables d'être dans les 5 premiers, "
+                    "combien le sont (sur 5) et part des courses où les 5 le sont (désordre).")
     total: Bilan
     par_jour: list[BilanJour]
 
@@ -162,6 +168,7 @@ def _course(rows, with_partants=True):
         "course_id": r0["course_id"], "heure_depart": _heure(r0["heure_depart"]),
         "hippodrome": r0["hippodrome"], "libelle": r0["libelle_course"],
         "specialite": r0["specialite"], "distance": r0["distance"], "nb_partants": r0["nb_partants"],
+        "quinte": bool(r0.get("quinte") or 0),
         "modele": r0["modele"], "mis_a_jour": r0["updated_at"],
     }
     if with_partants:
@@ -174,6 +181,12 @@ def _group(rows):
     for r in rows:
         out.setdefault(r["course_id"], []).append(r)
     return list(out.values())
+
+
+def _filtre(rows, quinte: bool | None):
+    if quinte is None:
+        return rows
+    return [r for r in rows if bool(r.get("quinte") or 0) == quinte]
 
 
 def _jour(d: date | None) -> str:
@@ -189,20 +202,22 @@ def sante(conn=Depends(db)):
 
 @app.get("/v1/courses", response_model=ReponseCourses, tags=["pronostics"])
 def courses(date_: date | None = Query(None, alias="date", description="AAAA-MM-JJ (défaut : aujourd'hui)"),
+            quinte: bool | None = Query(None, description="true : uniquement les courses support du Quinté+"),
             _owner: str = Depends(require_key), conn=Depends(db)):
     """Liste des courses d'un jour pour lesquelles des pronostics sont disponibles."""
     jour = _jour(date_)
-    return {"date": jour, "courses": [_course(g, False) for g in _group(store.get_day(conn, jour))]}
+    return {"date": jour, "courses": [_course(g, False) for g in _group(_filtre(store.get_day(conn, jour), quinte))]}
 
 
 @app.get("/v1/pronostics", response_model=ReponsePronostics, tags=["pronostics"])
 def pronostics(date_: date | None = Query(None, alias="date", description="AAAA-MM-JJ (défaut : aujourd'hui)"),
                top: int | None = Query(None, ge=1, le=20, description="ne garder que les N premiers par course"),
+               quinte: bool | None = Query(None, description="true : uniquement les courses support du Quinté+"),
                _owner: str = Depends(require_key), conn=Depends(db)):
     """Pronostics de toutes les courses d'un jour, partants classés par probabilité."""
     jour = _jour(date_)
     out = []
-    for g in _group(store.get_day(conn, jour)):
+    for g in _group(_filtre(store.get_day(conn, jour), quinte)):
         c = _course(g)
         if top:
             c["partants"] = c["partants"][:top]
@@ -222,6 +237,7 @@ def pronostics_course(course_id: str, _owner: str = Depends(require_key), conn=D
 @app.get("/v1/bilan", response_model=ReponseBilan, tags=["bilan"])
 def bilan(debut: date | None = Query(None, description="AAAA-MM-JJ (défaut : fin - 29 jours)"),
           fin: date | None = Query(None, description="AAAA-MM-JJ (défaut : hier)"),
+          quinte: bool | None = Query(None, description="true : uniquement les courses support du Quinté+"),
           _owner: str = Depends(require_key), conn=Depends(db)):
     """Performance réelle des pronostics publiés, comparée aux arrivées officielles."""
     fin = fin or datetime.now(PARIS).date() - timedelta(days=1)
@@ -231,5 +247,7 @@ def bilan(debut: date | None = Query(None, description="AAAA-MM-JJ (défaut : fi
     if (fin - debut).days > 366:
         raise HTTPException(422, "Période limitée à un an.")
     df = store.bilan_courses(conn, debut.isoformat(), fin.isoformat())
+    if quinte is not None:
+        df = df[df["quinte"] == quinte]
     return {"debut": debut.isoformat(), "fin": fin.isoformat(), "total": store.resume_bilan(df),
             "par_jour": [{"date": j, **store.resume_bilan(g)} for j, g in df.groupby("jour")]}

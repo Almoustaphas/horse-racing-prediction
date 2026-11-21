@@ -13,7 +13,7 @@ import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
 
 from prediction.features import DB_PATH, FEATURES, FEATURES_V1, build_features, load_raw
-from prediction.train import evaluate
+from prediction.train import TARGETS, evaluate
 
 MARKET = lambda f: f.startswith("p_ref") or f.startswith("prev_p_ref")
 
@@ -30,9 +30,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--folds", type=int, default=3)
     ap.add_argument("--months", type=int, default=4)
-    ap.add_argument("--target", choices=["win", "place"], default="win")
+    ap.add_argument("--target", choices=list(TARGETS), default="win")
     args = ap.parse_args()
-    target = "is_win" if args.target == "win" else "is_place"
+    target = TARGETS[args.target][0]
 
     t0 = time.time()
     df = build_features(load_raw(DB_PATH))

@@ -3,6 +3,7 @@
 Usage :
     python -m prediction.train                      # cible = gagnant
     python -m prediction.train --target place       # cible = placé (top 3)
+    python -m prediction.train --target top5        # cible = dans les 5 premiers
     python -m prediction.train --test-start 2026-05-01 --no-market
 
 Le jeu de test correspond aux courses à partir de --test-start : le modèle ne
@@ -23,6 +24,11 @@ from prediction.features import DB_PATH, FEATURES, build_features, load_raw
 MODELS_DIR = Path(os.environ.get("MODELS_DIR", Path(__file__).resolve().parent.parent / "models"))
 
 
+# Cible -> nombre de chevaux concernés par course (1 gagnant, 3 placés, 5 premiers)
+TARGETS = {"win": ("is_win", 1), "place": ("is_place", 3), "top5": ("is_top5", 5)}
+N_PLACES = {t: k for t, k in TARGETS.values()}
+
+
 def race_normalize(df, col):
     return df[col] / df.groupby("course_id")[col].transform("sum")
 
@@ -30,14 +36,21 @@ def race_normalize(df, col):
 def evaluate(df, prob_col, target):
     """Métriques par course. df : partants du jeu de test avec une colonne de proba."""
     d = df.copy()
-    d["p"] = race_normalize(d, prob_col).clip(lower=1e-6, upper=1 - 1e-6)
-    if target == "is_place":
-        d["p"] = (d["p"] * 3).clip(upper=1 - 1e-6)  # ≈ 3 places payées par course
+    k = N_PLACES[target]
+    # Les probabilités d'une course somment au nombre de chevaux concernés (k, ou moins si peu de partants)
+    n = d.groupby("course_id")[prob_col].transform("size").clip(upper=k)
+    d["p"] = (race_normalize(d, prob_col) * n).clip(lower=1e-6, upper=1 - 1e-6)
     y = d[target]
     out = {"logloss": -np.mean(y * np.log(d["p"]) + (1 - y) * np.log(1 - d["p"]))}
     # Le cheval jugé le plus probable par course
     top = d.loc[d.groupby("course_id")["p"].idxmax()]
     out["top1_reussite"] = top[target].mean()
+    if k == 5:
+        # Les 5 chevaux les plus probables du modèle face aux 5 premiers réels
+        rk = d.groupby("course_id")["p"].rank(ascending=False, method="first")
+        top5 = d[rk <= 5].groupby("course_id")[target]
+        out["top5_trouves"] = top5.sum().mean()            # sur 5 en moyenne
+        out["top5_complet"] = (top5.sum() >= 5).mean()     # les 5 dans le désordre
     if target == "is_win":
         # ROI pari simple gagnant de 1 € sur le favori du modèle (gain ≈ cote_direct)
         gain = np.where(top["is_win"] == 1, top["cote_direct"].fillna(0), 0)
@@ -54,11 +67,11 @@ def evaluate(df, prob_col, target):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", type=Path, default=DB_PATH)
-    ap.add_argument("--target", choices=["win", "place"], default="win")
+    ap.add_argument("--target", choices=list(TARGETS), default="win")
     ap.add_argument("--test-start", default=None, help="AAAA-MM-JJ (défaut : 6 derniers mois)")
     ap.add_argument("--no-market", action="store_true", help="exclure les variables de cote")
     args = ap.parse_args()
-    target = "is_win" if args.target == "win" else "is_place"
+    target = TARGETS[args.target][0]
 
     print("Chargement et calcul des variables…")
     df = build_features(load_raw(args.db))
@@ -99,6 +112,12 @@ def main():
         m = evaluate(sub, "p_model", target)
         print(f"  {spec:12s} {sub['course_id'].nunique():6d} courses  top1={m['top1_reussite']:.3f}"
               + (f"  roi_top1={m['roi_top1']:+.3f}" if "roi_top1" in m else ""))
+
+    if "quinte" in test and test["quinte"].eq(1).any():
+        q = test[test["quinte"] == 1]
+        print(f"\n=== Courses Quinté+ ({q['course_id'].nunique()}) ===")
+        print(pd.DataFrame({"Modèle": evaluate(q, "p_model", target),
+                            "Marché (cote réf.)": evaluate(q, "p_ref", target)}).T.round(4).to_string())
 
     MODELS_DIR.mkdir(exist_ok=True)
     name = f"model_{args.target}{'_nomarket' if args.no_market else ''}.joblib"

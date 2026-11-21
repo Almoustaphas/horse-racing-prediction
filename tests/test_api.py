@@ -177,3 +177,58 @@ def test_route_bilan(client, conn, key):
     assert [j["date"] for j in body["par_jour"]] == [DAY]
     assert client.get("/v1/bilan", params={"debut": "2026-12-01", "fin": DAY}, headers=h).status_code == 422
     assert client.get("/v1/bilan").status_code == 401
+
+
+# ------------------------------------------------------------- top 5 et Quinté+
+def big_course(n=7, quinte=1):
+    """Une course de n partants : le modèle classe 1..n, proba_top5 décroissante."""
+    rows = []
+    for i in range(1, n + 1):
+        rows.append({
+            "course_id": f"{DAY}_R1_C9", "jour": DAY, "heure_depart": C1_DEPART + 3_600_000,
+            "hippodrome": "VIN", "libelle_course": "PRIX DU QUINTE", "specialite": "PLAT",
+            "distance": 2000, "nb_partants": n, "num_pmu": i, "nom": f"Q{i}", "driver": "D",
+            "entraineur": "E", "proba": (n + 1 - i) / 28, "proba_place": None,
+            "proba_top5": min(0.99, (n + 1 - i) / 6), "cote_juste": 28 / (n + 1 - i),
+            "cote_reference": 28 / (n + 1 - i), "rang": i, "modele": "avec cotes", "quinte": quinte,
+        })
+    return pd.DataFrame(rows)
+
+
+def test_filtre_quinte(client, conn, key):
+    store.save_predictions(conn, DAY, pd.concat([fake_predictions(), big_course()]))
+    h = {"X-API-Key": key}
+    r = client.get("/v1/pronostics", params={"date": DAY, "quinte": "true"}, headers=h).json()
+    assert [c["course_id"] for c in r["courses"]] == [f"{DAY}_R1_C9"]
+    assert r["courses"][0]["quinte"] is True
+    assert r["courses"][0]["partants"][0]["proba_top5"] == pytest.approx(0.99)
+    tous = client.get("/v1/courses", params={"date": DAY}, headers=h).json()["courses"]
+    assert len(tous) == 3 and [c["quinte"] for c in tous][:2] == [False, False]
+
+
+def test_bilan_top5(conn):
+    store.save_predictions(conn, DAY, big_course(), now_ms=0)
+    # Arrivée : 1, 2, 3, 6, 4 -> 4 des 5 premiers choix (1 à 5) sont dans les 5 premiers
+    ordre = {1: 1, 2: 2, 3: 3, 6: 4, 4: 5, 5: 6, 7: 7}
+    res = pd.DataFrame([(f"{DAY}_R1_C9", n, "PARTANT", o, 3.0) for n, o in ordre.items()],
+                       columns=["course_id", "num_pmu", "statut", "ordre_arrivee", "cote_direct"])
+    store.save_results(conn, DAY, res)
+    df = store.bilan_courses(conn, DAY, DAY)
+    r = store.resume_bilan(df[df["quinte"]])
+    assert r["courses"] == 1 and r["top5_trouves_moyen"] == 4 and r["top5_complet"] == 0.0
+
+
+def test_ancienne_base_mise_a_niveau(tmp_path):
+    import sqlite3
+    path = tmp_path / "old.sqlite"
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE pronostics (course_id TEXT, num_pmu INTEGER, jour TEXT, heure_depart INTEGER, "
+                "hippodrome TEXT, libelle_course TEXT, specialite TEXT, distance INTEGER, nb_partants INTEGER, "
+                "nom TEXT, driver TEXT, entraineur TEXT, proba REAL, proba_place REAL, cote_juste REAL, "
+                "cote_reference REAL, rang INTEGER, modele TEXT, updated_at TEXT, PRIMARY KEY (course_id, num_pmu))")
+    old.commit(); old.close()
+    c = store.connect(path)
+    cols = {r[1] for r in c.execute("PRAGMA table_info(pronostics)")}
+    assert {"proba_top5", "quinte"} <= cols
+    store.save_predictions(c, DAY, big_course())
+    assert len(store.get_day(c, DAY)) == 7
