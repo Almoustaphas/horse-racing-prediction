@@ -1,6 +1,7 @@
 services:
   api:
     build: .
+    user: appuser
     ports:
       - "8000:8000"
     environment:
@@ -16,6 +17,7 @@ services:
 
   scheduler:
     build: .
+    user: appuser
     command: ["python", "-m", "api.jobs", "scheduler"]
     volumes:
       - ./database:/app/database

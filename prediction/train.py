@@ -9,6 +9,7 @@ Le jeu de test correspond aux courses à partir de --test-start : le modèle ne
 les voit jamais pendant l'entraînement, comme en conditions réelles.
 """
 
+import os
 import argparse
 from pathlib import Path
 
@@ -19,7 +20,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 
 from prediction.features import DB_PATH, FEATURES, build_features, load_raw
 
-MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
+MODELS_DIR = Path(os.environ.get("MODELS_DIR", Path(__file__).resolve().parent.parent / "models"))
 
 
 def race_normalize(df, col):

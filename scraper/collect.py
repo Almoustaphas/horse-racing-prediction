@@ -8,6 +8,7 @@ La collecte est reprenable : un jour déjà présent dans `collected_days`
 est ignoré (sauf --force).
 """
 
+import os
 import argparse
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -16,7 +17,7 @@ from pathlib import Path
 
 from scraper.pmu_client import PMUClient
 
-DB_PATH = Path(__file__).resolve().parent.parent / "database" / "pmu.sqlite"
+DB_PATH = Path(os.environ.get("PMU_DB_PATH", Path(__file__).resolve().parent.parent / "database" / "pmu.sqlite"))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS collected_days (

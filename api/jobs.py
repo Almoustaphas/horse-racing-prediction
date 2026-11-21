@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 
 from api import store
 from prediction.features import DB_PATH
-from prediction.predict import predict_day
+from prediction.predict import MODELS_DIR, predict_day
 from scraper.collect import SCHEMA as PMU_SCHEMA, collect_day
 from scraper.pmu_client import PMUClient
 
@@ -79,11 +79,21 @@ def daily():
     refresh(today_paris())
 
 
+def data_ready(wait=False) -> bool:
+    """Vrai si la base de collecte et les modèles sont présents (premier déploiement : disque vide)."""
+    missing = [str(p) for p in (DB_PATH, MODELS_DIR / "model_win.joblib") if not p.exists()]
+    if missing and wait:
+        print(f"En attente des données : {', '.join(missing)} (voir README, déploiement)", flush=True)
+    return not missing
+
+
 def scheduler():
     """Boucle simple, sans dépendance externe. Une erreur n'arrête pas la boucle."""
     last_daily = None
     last_refresh = 0.0
     print("Planificateur démarré", flush=True)
+    while not data_ready(wait=True):
+        time.sleep(60)
     while True:
         now = datetime.now(PARIS)
         try:

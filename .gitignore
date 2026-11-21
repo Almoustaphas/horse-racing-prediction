@@ -6,3 +6,4 @@ data/raw/
 data/processed/
 models/
 .ipynb_checkpoints/
+export/

@@ -6,6 +6,7 @@ entraîneur) sont calculées en cumul sur les courses antérieures uniquement
 (tri chronologique + exclusion de la ligne courante).
 """
 
+import os
 import re
 import sqlite3
 from pathlib import Path
@@ -13,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-DB_PATH = Path(__file__).resolve().parent.parent / "database" / "pmu.sqlite"
+DB_PATH = Path(os.environ.get("PMU_DB_PATH", Path(__file__).resolve().parent.parent / "database" / "pmu.sqlite"))
 
 MUSIQUE_TOKEN = re.compile(r"(\d|[A-Z])([a-z])")
 
@@ -21,18 +22,31 @@ MUSIQUE_TOKEN = re.compile(r"(\d|[A-Z])([a-z])")
 CATEGORICAL = ["specialite", "sexe", "oeilleres", "deferre", "corde", "type_piste", "categorie"]
 
 
-def load_raw(db_path=DB_PATH) -> pd.DataFrame:
+# Colonnes de la base jamais utilisées par le modèle : non chargées (mémoire)
+UNUSED_COLUMNS = {
+    "id_cheval", "race", "pays_cheval", "proprietaire", "eleveur", "pere_mere",
+    "nb_places_2", "nb_places_3", "gains_victoires", "gains_place", "gains_annee_prec",
+    "supplement", "favori", "temps_obtenu",
+}
+
+
+def load_raw(db_path=DB_PATH, chunksize=50_000) -> pd.DataFrame:
+    """Charge les partants avec leur course. Lecture par tranches pour limiter le pic
+    de mémoire (≈ 2 Go en une fois, la machine de production n'en a pas autant)."""
     conn = sqlite3.connect(db_path)
-    df = pd.read_sql_query(
-        """
-        SELECT p.*, c.jour, c.heure_depart, c.hippodrome, c.discipline, c.specialite,
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(participants)") if r[1] not in UNUSED_COLUMNS]
+    chunks = pd.read_sql_query(
+        f"""
+        SELECT {", ".join("p." + c for c in cols)},
+               c.jour, c.heure_depart, c.hippodrome, c.discipline, c.specialite,
                c.distance, c.corde, c.type_piste, c.categorie, c.montant_prix,
                c.penetrometre, c.temperature
         FROM participants p JOIN courses c USING (course_id)
         WHERE p.statut = 'PARTANT'
         """,
-        conn,
+        conn, chunksize=chunksize,
     )
+    df = pd.concat(list(chunks), ignore_index=True)
     conn.close()
     return df
 

@@ -8,6 +8,7 @@ Les partants du jour sont ajoutés à la suite de l'historique de la base pour
 calculer les mêmes variables qu'à l'entraînement.
 """
 
+import os
 import argparse
 from datetime import date
 from pathlib import Path
@@ -21,7 +22,7 @@ from scraper.collect import course_row, g, participant_row
 from scraper.pmu_client import PMUClient
 
 ROOT = Path(__file__).resolve().parent.parent
-MODELS_DIR = ROOT / "models"
+MODELS_DIR = Path(os.environ.get("MODELS_DIR", ROOT / "models"))
 
 OUTPUT_COLUMNS = [
     "course_id", "jour", "heure_depart", "hippodrome", "libelle_course", "specialite",

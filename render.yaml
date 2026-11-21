@@ -1,0 +1,27 @@
+# Blueprint Render : https://render.com/docs/blueprint-spec
+# Un seul service (API + planificateur) : un disque Render n'est attaché qu'à un service.
+services:
+  - type: web
+    name: pronostics-hippiques
+    runtime: docker
+    plan: standard          # 1 CPU, 2 Go : le calcul des pronostics culmine vers 1,4 Go
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    dockerCommand: /app/deploy/entrypoint.sh /app/deploy/start.sh
+    healthCheckPath: /sante
+    autoDeployTrigger: commit
+    disk:
+      name: donnees
+      mountPath: /app/data
+      sizeGB: 2
+    envVars:
+      - key: DATA_DIR
+        value: /app/data
+      - key: PMU_DB_PATH
+        value: /app/data/pmu.sqlite
+      - key: API_DB_PATH
+        value: /app/data/api.sqlite
+      - key: MODELS_DIR
+        value: /app/data/models
+      - key: RATE_LIMIT_PER_MIN
+        value: "60"

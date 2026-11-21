@@ -1,0 +1,8 @@
+#!/bin/bash
+# Raccourci pour le shell de production : `hrp create-key alice`, `hrp bilan`…
+# Exécute api.jobs sous l'utilisateur appuser (évite des fichiers SQLite appartenant à root).
+cd /app
+if [ "$(id -u)" = 0 ]; then
+    exec setpriv --reuid=appuser --regid=appuser --init-groups python -m api.jobs "$@"
+fi
+exec python -m api.jobs "$@"

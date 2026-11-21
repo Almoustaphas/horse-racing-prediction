@@ -18,6 +18,7 @@ api/
   main.py         API FastAPI (clé d'API, limite de requêtes)
   store.py        base de l'API : pronostics publiés, archive, arrivées, clés, journal
   jobs.py         tâches : publication, collecte quotidienne, bilan, planificateur, clés
+deploy/           production : démarrage, raccourci `hrp`, archive des données
 tests/            tests (pytest)
 ```
 
@@ -112,8 +113,8 @@ docker compose exec api python -m api.jobs create-key alice
 `database/` et `models/` sont montés depuis la machine hôte : il faut y avoir la base collectée
 et les trois modèles entraînés. En production, placer l'API derrière un proxy HTTPS (Caddy, Nginx).
 
-- Mémoire : le calcul des pronostics charge tout l'historique et culmine vers **2 Go**.
-  Prévoir au moins 3 Go pour Docker (Docker Desktop : Paramètres → Resources → Memory).
+- Mémoire : le calcul des pronostics charge tout l'historique et culmine vers **1,5 Go**.
+  Prévoir au moins 2 Go pour Docker (Docker Desktop : Paramètres → Resources → Memory).
 - Docker Desktop fait tourner les conteneurs dans une machine virtuelle : les verrous SQLite
   ne sont pas partagés avec la machine hôte. Ne lancez pas de commande sur `database/`
   depuis l'hôte pendant que les conteneurs tournent (sans risque avec Docker Engine sous Linux).
@@ -121,6 +122,39 @@ et les trois modèles entraînés. En production, placer l'API derrière un prox
 ```bash
 .venv/bin/pytest      # tests
 ```
+
+### Déploiement sur Render
+
+`render.yaml` décrit un seul service web Docker (offre *Standard* : 1 CPU, 2 Go, région Francfort)
+qui fait tourner l'API **et** le planificateur, avec un disque persistant de 2 Go monté sur
+`/app/data` (un disque Render n'est attaché qu'à un service ; l'offre gratuite n'en a pas).
+Les déploiements avec disque ne sont pas sans coupure : quelques secondes d'arrêt à chaque mise à jour.
+
+1. **Créer le service** : sur dashboard.render.com, *New → Blueprint*, choisir le dépôt GitHub.
+   Render lit `render.yaml` et crée le service et son disque (payant : voir les tarifs affichés).
+   Chaque `git push` sur `main` redéploie.
+2. **Envoyer les données** (le disque est vide au départ ; le service répond mais attend les données) :
+   ```bash
+   .venv/bin/python -m deploy.pack_data    # -> export/donnees.tar.gz (≈ 70 Mo : base + modèles)
+   ```
+   Ajouter sa clé SSH publique dans *Account Settings → SSH Public Keys*, puis copier l'adresse
+   indiquée dans l'onglet *Connect → SSH* du service :
+   ```bash
+   scp -s export/donnees.tar.gz <adresse-ssh-du-service>:/tmp/
+   ```
+   Dans l'onglet *Shell* du service (ou via `ssh`) :
+   ```bash
+   tar -xzf /tmp/donnees.tar.gz -C /app/data && rm /tmp/donnees.tar.gz
+   ```
+   Le planificateur détecte les données dans la minute : collecte de la veille, puis pronostics.
+3. **Créer les clés** dans le *Shell* du service : `hrp create-key alice` (aussi `hrp list-keys`,
+   `hrp revoke-key`, `hrp bilan`). Toujours passer par `hrp` : il s'exécute sous l'utilisateur du
+   service (une commande lancée en root créerait des fichiers SQLite illisibles par l'API).
+4. **Vérifier** : `https://<nom-du-service>.onrender.com/sante` puis `/docs`.
+
+Mettre à jour les modèles après un réentraînement local : refaire l'étape 2 (la base de production,
+alimentée chaque jour par le planificateur, est alors remplacée par la copie locale).
+Les journaux du service (*Logs*) montrent chaque collecte, bilan et publication.
 
 ## Méthode
 
